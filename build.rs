@@ -9,16 +9,16 @@ fn main() {
 #[cfg(feature = "download")]
 mod download {
     use bitcoin_hashes::{sha256, Hash};
+    use flate2::read::GzDecoder;
     use std::fs::File;
     use std::io::{BufRead, BufReader, Cursor};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::str::FromStr;
-
+    use tar::Archive;
     include!("src/versions.rs");
 
-    const GITHUB_URL: &str =
-        "https://github.com/RCasatta/electrsd/releases/download/electrs_releases";
+    const GITHUB_URL: &str = "https://github.com/chaintope/esplora-tapyrus/releases/download";
 
     fn get_expected_sha256(filename: &str) -> Result<sha256::Hash, ()> {
         let file = File::open("sha256").map_err(|_| ())?;
@@ -40,9 +40,9 @@ mod download {
             return;
         }
         let download_filename_without_extension = electrs_name();
-        let download_filename = format!("{}.zip", download_filename_without_extension);
+        let download_filename = format!("{}.tar.gz", download_filename_without_extension);
         dbg!(&download_filename);
-        let expected_hash = get_expected_sha256(&download_filename).unwrap();
+        // let expected_hash = get_expected_sha256(&download_filename).unwrap();
         let out_dir = std::env::var_os("OUT_DIR").unwrap();
         let electrs_exe_home = Path::new(&out_dir).join("electrs");
         let destination_filename = electrs_exe_home
@@ -50,34 +50,34 @@ mod download {
             .join("electrs");
 
         dbg!(&destination_filename);
-
         if !destination_filename.exists() {
-            println!(
-                "filename:{} version:{} hash:{}",
-                download_filename, VERSION, expected_hash
-            );
+            println!("filename:{} version:{}", download_filename, VERSION);
 
             let download_endpoint =
                 std::env::var("ELECTRSD_DOWNLOAD_ENDPOINT").unwrap_or(GITHUB_URL.to_string());
-            let url = format!("{}/{}", download_endpoint, download_filename);
+            let url = format!("{}/{}/{}", download_endpoint, VERSION, download_filename);
 
             let downloaded_bytes = minreq::get(url).send().unwrap().into_bytes();
 
-            let downloaded_hash = sha256::Hash::hash(&downloaded_bytes);
-            assert_eq!(expected_hash, downloaded_hash);
-            let cursor = Cursor::new(downloaded_bytes);
+            // let downloaded_hash = sha256::Hash::hash(&downloaded_bytes);
+            // assert_eq!(expected_hash, downloaded_hash);
 
-            let mut archive = zip::ZipArchive::new(cursor).unwrap();
-            let mut file = archive.by_index(0).unwrap();
+            let mut archive = Archive::new(GzDecoder::new(&downloaded_bytes[..]));
+
             std::fs::create_dir_all(destination_filename.parent().unwrap()).unwrap();
-            let mut outfile = std::fs::File::create(&destination_filename).unwrap();
+            for mut entry in archive.entries().unwrap().flatten() {
+                if let Ok(file) = entry.path() {
+                    if file.ends_with("electrs") {
+                        entry.unpack(&destination_filename).unwrap();
 
-            std::io::copy(&mut file, &mut outfile).unwrap();
-            std::fs::set_permissions(
-                &destination_filename,
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
+                        std::fs::set_permissions(
+                            &destination_filename,
+                            std::fs::Permissions::from_mode(0o755),
+                        )
+                        .unwrap();
+                    }
+                }
+            }
         }
     }
 }

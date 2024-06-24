@@ -18,7 +18,7 @@ assert_eq!(header.height, 0);
 In your project Cargo.toml, activate the following features
 
 ```yml
-electrsd = { version= "0.23", features = ["bitcoind_23_1", "electrs_0_9_1"] }
+electrsd = { version= "0.23", features = ["tapyrusd_0_5_2", "electrs_0_5_1"] }
 ```
 
 Then use it:

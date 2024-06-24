@@ -4,12 +4,11 @@
 use std::thread;
 use std::time::Duration;
 
-use electrum_client::{bitcoin::Txid, ElectrumApi};
+use electrum_client::{tapyrus::Txid, ElectrumApi};
 
 use crate::ElectrsD;
 
 impl ElectrsD {
-    #[cfg(not(feature = "electrs_0_8_10"))]
     /// wait up to a minute the electrum server has indexed up to the given height.
     pub fn wait_height(&self, height: usize) {
         for _ in 0..600 {
@@ -26,7 +25,7 @@ impl ElectrsD {
             match self.client.transaction_get(txid) {
                 Ok(tx) => {
                     // having the raw tx doesn't mean the scripts has been indexed
-                    let txid = tx.compute_txid();
+                    let txid = tx.txid();
                     if let Some(output) = tx.output.first() {
                         let history = self
                             .client
@@ -53,21 +52,24 @@ impl ElectrsD {
 #[cfg(test)]
 mod test {
     use crate::test::setup_nodes;
-    use bitcoind::bitcoincore_rpc::RpcApi;
-    use electrum_client::{bitcoin::Amount, ElectrumApi};
+    use electrum_client::{tapyrus::Amount, ElectrumApi};
+    use tapyrusd::get_private_key;
+    use tapyrusd::tapyruscore_rpc::RpcApi;
 
-    #[cfg(not(feature = "electrs_0_8_10"))]
     #[test]
     fn test_wait_height() {
-        let (_, bitcoind, electrsd) = setup_nodes();
+        let (_, tapyrusd, electrsd) = setup_nodes();
         let header = electrsd.client.block_headers_subscribe().unwrap();
         assert_eq!(header.height, 1);
-        let address = bitcoind
+        let address = tapyrusd
             .client
-            .get_new_address(None, None)
+            .get_new_address(None)
             .unwrap()
             .assume_checked();
-        bitcoind.client.generate_to_address(100, &address).unwrap();
+        tapyrusd
+            .client
+            .generate_to_address(100, &address, get_private_key())
+            .unwrap();
         electrsd.wait_height(101);
         let header = electrsd.client.block_headers_subscribe().unwrap();
         assert_eq!(header.height, 101);
@@ -75,29 +77,29 @@ mod test {
 
     #[test]
     fn test_wait_tx() {
-        let (_, bitcoind, electrsd) = setup_nodes();
+        let (_, tapyrusd, electrsd) = setup_nodes();
         let header = electrsd.client.block_headers_subscribe().unwrap();
         assert_eq!(header.height, 1);
-        let generate_address = bitcoind
+        let generate_address = tapyrusd
             .client
-            .get_new_address(None, None)
+            .get_new_address(None)
             .unwrap()
             .assume_checked();
-        bitcoind
+        tapyrusd
             .client
-            .generate_to_address(100, &generate_address)
+            .generate_to_address(100, &generate_address, get_private_key())
             .unwrap();
 
-        let address = bitcoind
+        let address = tapyrusd
             .client
-            .get_new_address(None, None)
+            .get_new_address(None)
             .unwrap()
             .assume_checked();
-        let txid = bitcoind
+        let txid = tapyrusd
             .client
             .send_to_address(
                 &address,
-                Amount::from_sat(10000),
+                Amount::from_tap(10000),
                 None,
                 None,
                 None,

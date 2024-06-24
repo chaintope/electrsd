@@ -10,22 +10,22 @@ mod error;
 mod ext;
 mod versions;
 
-use bitcoind::anyhow;
-use bitcoind::anyhow::Context;
-use bitcoind::bitcoincore_rpc::jsonrpc::serde_json::Value;
-use bitcoind::bitcoincore_rpc::RpcApi;
-use bitcoind::tempfile::TempDir;
-use bitcoind::{get_available_port, BitcoinD};
 use electrum_client::raw_client::{ElectrumPlaintextStream, RawClient};
-use log::{debug, error, warn};
+use log::{error, warn};
 use std::env;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+use tapyrusd::anyhow;
+use tapyrusd::anyhow::Context;
+use tapyrusd::tapyruscore_rpc::jsonrpc::serde_json::Value;
+use tapyrusd::tapyruscore_rpc::RpcApi;
+use tapyrusd::tempfile::TempDir;
+use tapyrusd::{get_available_port, get_private_key, TapyrusD};
 
-// re-export bitcoind
-pub use bitcoind;
+// re-export tapyrusd
+pub use tapyrusd;
 // re-export electrum_client because calling RawClient methods requires the ElectrumApi trait
 pub use electrum_client;
 
@@ -39,7 +39,7 @@ pub use which;
 /// let mut conf = electrsd::Conf::default();
 /// conf.view_stderr = false;
 /// conf.http_enabled = false;
-/// conf.network = "regtest";
+/// conf.network = "dev";
 /// conf.tmpdir = None;
 /// conf.staticdir = None;
 /// assert_eq!(conf, electrsd::Conf::default());
@@ -57,7 +57,7 @@ pub struct Conf<'a> {
     /// if `true` electrsd exposes an esplora endpoint
     pub http_enabled: bool,
 
-    /// Must match bitcoind network
+    /// Must match tapyrusd network
     pub network: &'a str,
 
     /// Optionally specify a temporary or persistent working directory for the electrs.
@@ -85,9 +85,8 @@ pub struct Conf<'a> {
 
 impl Default for Conf<'_> {
     fn default() -> Self {
-        let args = if cfg!(feature = "electrs_0_9_1")
-            || cfg!(feature = "electrs_0_8_10")
-            || cfg!(feature = "esplora_a33e97e1")
+        let args = if cfg!(feature = "electrs_0_5_1")
+            || cfg!(feature = "electrs_0_5_0")
             || cfg!(feature = "legacy")
         {
             vec!["-vvv"]
@@ -99,7 +98,7 @@ impl Default for Conf<'_> {
             args,
             view_stderr: false,
             http_enabled: false,
-            network: "regtest",
+            network: "dev",
             tmpdir: None,
             staticdir: None,
             attempts: 3,
@@ -107,7 +106,7 @@ impl Default for Conf<'_> {
     }
 }
 
-/// Struct representing the bitcoind process with related information
+/// Struct representing the tapyrusd process with related information
 pub struct ElectrsD {
     /// Process child handle, used to terminate the process when this struct is dropped
     process: Child,
@@ -141,29 +140,32 @@ impl DataDir {
 }
 
 impl ElectrsD {
-    /// Create a new electrs process connected with the given bitcoind and default args.
-    pub fn new<S: AsRef<OsStr>>(exe: S, bitcoind: &BitcoinD) -> anyhow::Result<ElectrsD> {
-        ElectrsD::with_conf(exe, bitcoind, &Conf::default())
+    /// Create a new electrs process connected with the given tapyrusd and default args.
+    pub fn new<S: AsRef<OsStr>>(exe: S, tapyrusd: &TapyrusD) -> anyhow::Result<ElectrsD> {
+        ElectrsD::with_conf(exe, tapyrusd, &Conf::default())
     }
 
-    /// Create a new electrs process using given [Conf] connected with the given bitcoind
+    /// Create a new electrs process using given [Conf] connected with the given tapyrusd
     pub fn with_conf<S: AsRef<OsStr>>(
         exe: S,
-        bitcoind: &BitcoinD,
+        tapyrusd: &TapyrusD,
         conf: &Conf,
     ) -> anyhow::Result<ElectrsD> {
-        let response = bitcoind.client.call::<Value>("getblockchaininfo", &[])?;
+        let response = tapyrusd.client.call::<Value>("getblockchaininfo", &[])?;
         if response
             .get("initialblockdownload")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            // electrum will remain idle until bitcoind is in IBD
-            // bitcoind will remain in IBD if doesn't see a block from a long time, thus adding a block
-            let node_address = bitcoind.client.call::<Value>("getnewaddress", &[])?;
-            bitcoind
+            // electrum will remain idle until tapyrusd is in IBD
+            // tapyrusd will remain in IBD if doesn't see a block from a long time, thus adding a block
+            let node_address = tapyrusd.client.call::<Value>("getnewaddress", &[])?;
+            tapyrusd
                 .client
-                .call::<Value>("generatetoaddress", &[1.into(), node_address])
+                .call::<Value>(
+                    "generatetoaddress",
+                    &[1.into(), node_address, get_private_key().into()],
+                )
                 .unwrap();
         }
 
@@ -194,7 +196,7 @@ impl ElectrsD {
         #[cfg(not(feature = "legacy"))]
         {
             args.push("--cookie-file");
-            cookie_file = format!("{}", bitcoind.params.cookie_file.display());
+            cookie_file = format!("{}", tapyrusd.params.cookie_file.display());
             args.push(&cookie_file);
         }
 
@@ -204,28 +206,28 @@ impl ElectrsD {
         {
             use std::io::Read;
             args.push("--cookie");
-            let mut cookie = std::fs::File::open(&bitcoind.params.cookie_file)?;
+            let mut cookie = std::fs::File::open(&tapyrusd.params.cookie_file)?;
             cookie_value = String::new();
             cookie.read_to_string(&mut cookie_value)?;
             args.push(&cookie_value);
         }
 
         args.push("--daemon-rpc-addr");
-        let rpc_socket = bitcoind.params.rpc_socket.to_string();
+        let rpc_socket = tapyrusd.params.rpc_socket.to_string();
         args.push(&rpc_socket);
 
         let p2p_socket;
-        if cfg!(feature = "electrs_0_8_10")
-            || cfg!(feature = "esplora_a33e97e1")
+        if cfg!(feature = "electrs_0_5_0")
+            || cfg!(feature = "electrs_0_5_1")
             || cfg!(feature = "legacy")
         {
             args.push("--jsonrpc-import");
         } else {
             args.push("--daemon-p2p-addr");
-            p2p_socket = bitcoind
+            p2p_socket = tapyrusd
                 .params
                 .p2p_socket
-                .expect("electrs_0_9_1 requires bitcoind with p2p port open")
+                .expect("electrs_0_5_1 or electrs_0_5_0 requires tapyrusd with p2p port open")
                 .to_string();
             args.push(&p2p_socket);
         }
@@ -256,7 +258,7 @@ impl ElectrsD {
             Stdio::null()
         };
 
-        debug!("args: {:?}", args);
+        println!("args: {:?}", args);
         let mut process = Command::new(&exe)
             .args(args)
             .stderr(view_stderr)
@@ -269,7 +271,7 @@ impl ElectrsD {
                     warn!("early exit with: {:?}. Trying to launch again ({} attempts remaining), maybe some other process used our available port", status, conf.attempts);
                     let mut conf = conf.clone();
                     conf.attempts -= 1;
-                    return Self::with_conf(exe, bitcoind, &conf)
+                    return Self::with_conf(exe, tapyrusd, &conf)
                         .with_context(|| format!("Remaining attempts {}", conf.attempts));
                 } else {
                     error!("early exit with: {:?}", status);
@@ -363,7 +365,7 @@ pub fn downloaded_exe_path() -> Option<String> {
 ///
 /// 1) If it's specified in the `ELECTRS_EXEC` or in `ELECTRS_EXE` env var
 /// (errors if both env vars are present)
-/// 2) If there is no env var but an auto-download feature such as `electrs_0_9_11` is enabled, returns the
+/// 2) If there is no env var but an auto-download feature such as `electrs_0_5_1` is enabled, returns the
 /// path of the downloaded executabled
 /// 3) If neither of the precedent are available, the `electrs` executable is searched in the `PATH`
 pub fn exe_path() -> anyhow::Result<String> {
@@ -379,6 +381,7 @@ pub fn exe_path() -> anyhow::Result<String> {
     if let Some(path) = downloaded_exe_path() {
         return Ok(path);
     }
+
     which::which("electrs")
         .map_err(|_| Error::NoElectrsExecutableFound.into())
         .map(|p| p.display().to_string())
@@ -386,13 +389,14 @@ pub fn exe_path() -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod test {
-    use crate::bitcoind::P2P;
     use crate::exe_path;
+    use crate::get_private_key;
+    use crate::tapyrusd::P2P;
     use crate::ElectrsD;
-    use bitcoind::bitcoincore_rpc::RpcApi;
     use electrum_client::ElectrumApi;
     use log::{debug, log_enabled, Level};
     use std::env;
+    use tapyrusd::tapyruscore_rpc::RpcApi;
 
     #[test]
     #[ignore] // launch singularly since env are globals
@@ -407,15 +411,18 @@ mod test {
 
     #[test]
     fn test_electrsd() {
-        let (electrs_exe, bitcoind, electrsd) = setup_nodes();
+        let (electrs_exe, tapyrusd, electrsd) = setup_nodes();
         let header = electrsd.client.block_headers_subscribe().unwrap();
         assert_eq!(header.height, 1);
-        let address = bitcoind
+        let address = tapyrusd
             .client
-            .get_new_address(None, None)
+            .get_new_address(None)
             .unwrap()
             .assume_checked();
-        bitcoind.client.generate_to_address(100, &address).unwrap();
+        tapyrusd
+            .client
+            .generate_to_address(100, &address, get_private_key())
+            .unwrap();
 
         electrsd.trigger().unwrap();
 
@@ -429,43 +436,42 @@ mod test {
         assert_eq!(header.height, 101);
 
         // launch another instance to check there are no fixed port used
-        let electrsd = ElectrsD::new(&electrs_exe, &bitcoind).unwrap();
+        let electrsd = ElectrsD::new(&electrs_exe, &tapyrusd).unwrap();
         let header = electrsd.client.block_headers_subscribe().unwrap();
         assert_eq!(header.height, 101);
     }
 
     #[test]
     fn test_kill() {
-        let (_, bitcoind, mut electrsd) = setup_nodes();
-        let _ = bitcoind.client.ping().unwrap(); // without using bitcoind, it is dropped and all the rest fails.
+        let (_, tapyrusd, mut electrsd) = setup_nodes();
+        let _ = tapyrusd.client.ping().unwrap(); // without using tapyrusd, it is dropped and all the rest fails.
         let _ = electrsd.client.ping().unwrap();
         assert!(electrsd.client.ping().is_ok());
         electrsd.kill().unwrap();
         assert!(electrsd.client.ping().is_err());
     }
 
-    pub(crate) fn setup_nodes() -> (String, bitcoind::BitcoinD, ElectrsD) {
-        let (bitcoind_exe, electrs_exe) = init();
-        debug!("bitcoind: {}", &bitcoind_exe);
-        debug!("electrs: {}", &electrs_exe);
-        let mut conf = bitcoind::Conf::default();
+    pub(crate) fn setup_nodes() -> (String, tapyrusd::TapyrusD, ElectrsD) {
+        let (tapyrusd_exe, electrs_exe) = init();
+        println!("tapyrusd: {}", &tapyrusd_exe);
+        println!("electrs: {}", &electrs_exe);
+        let mut conf = tapyrusd::Conf::default();
         conf.view_stdout = log_enabled!(Level::Debug);
-        if !cfg!(feature = "electrs_0_8_10") && !cfg!(feature = "esplora_a33e97e1") {
-            conf.p2p = P2P::Yes;
-        }
-        let bitcoind = bitcoind::BitcoinD::with_conf(&bitcoind_exe, &conf).unwrap();
+        conf.p2p = P2P::Yes;
+        let tapyrusd: tapyrusd::TapyrusD =
+            tapyrusd::TapyrusD::with_conf(&tapyrusd_exe, &conf).unwrap();
         let electrs_conf = crate::Conf {
             view_stderr: log_enabled!(Level::Debug),
             ..Default::default()
         };
-        let electrsd = ElectrsD::with_conf(&electrs_exe, &bitcoind, &electrs_conf).unwrap();
-        (electrs_exe, bitcoind, electrsd)
+        let electrsd = ElectrsD::with_conf(&electrs_exe, &tapyrusd, &electrs_conf).unwrap();
+        (electrs_exe, tapyrusd, electrsd)
     }
 
     fn init() -> (String, String) {
         let _ = env_logger::try_init();
-        let bitcoind_exe_path = bitcoind::exe_path().unwrap();
+        let tapyrusd_exe_path = tapyrusd::exe_path().unwrap();
         let electrs_exe_path = exe_path().unwrap();
-        (bitcoind_exe_path, electrs_exe_path)
+        (tapyrusd_exe_path, electrs_exe_path)
     }
 }

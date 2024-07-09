@@ -10,7 +10,7 @@ edition = "2018"
 categories = ["cryptography::cryptocurrencies", "development-tools::testing"]
 
 [dependencies]
-tapyrusd = { git = "https://github.com/chaintope/tapyrusd", branch="use_rust_tapyrus" }
+tapyrusd = { git = "https://github.com/chaintope/tapyrusd", branch="fix_download_filename" }
 electrum-client = { git = "https://github.com/chaintope/rust-electrum-client", default-features = false }
 log = { version = "0.4" }
 which = { version = "4.2.5" }

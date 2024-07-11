@@ -4,9 +4,8 @@
 use std::thread;
 use std::time::Duration;
 
-use electrum_client::{tapyrus::Txid, ElectrumApi};
-
 use crate::ElectrsD;
+use electrum_client::{tapyrus::MalFixTxid, ElectrumApi};
 
 impl ElectrsD {
     /// wait up to a minute the electrum server has indexed up to the given height.
@@ -20,12 +19,12 @@ impl ElectrsD {
     }
 
     /// wait up to a minute the electrum server has indexed the given transaction
-    pub fn wait_tx(&self, txid: &Txid) {
+    pub fn wait_tx(&self, txid: &MalFixTxid) {
         'main_loop: for _ in 0..600 {
             match self.client.transaction_get(txid) {
                 Ok(tx) => {
                     // having the raw tx doesn't mean the scripts has been indexed
-                    let txid = tx.txid();
+                    let txid = tx.malfix_txid();
                     if let Some(output) = tx.output.first() {
                         let history = self
                             .client
